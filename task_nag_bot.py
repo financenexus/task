@@ -38,10 +38,10 @@ Tasks persist in tasks.json next to this script.
 import json
 import os
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from telegram import Update
-from telegram.ext import ApplicationBuilder, MessageHandler, ContextTypes, filters
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
 from openai import OpenAI
 
 logging.basicConfig(level=logging.INFO)
@@ -124,7 +124,7 @@ def next_interval_minutes(deadline_iso):
     if not deadline_iso:
         return 45  # no deadline given -> steady gentle nags
     deadline = datetime.fromisoformat(deadline_iso)
-    remaining = (deadline - datetime.utcnow()).total_seconds() / 60.0
+    remaining = (deadline - datetime.now(timezone.utc)).total_seconds() / 60.0
     if remaining > 120:
         return 45
     elif remaining > 30:
@@ -156,7 +156,7 @@ async def nag_job(context: ContextTypes.DEFAULT_TYPE):
     deadline_note = ""
     if task.get("deadline_iso"):
         deadline_note = f"\nDue: {task['deadline_iso']}"
-    overdue = task.get("deadline_iso") and datetime.fromisoformat(task["deadline_iso"]) < datetime.utcnow()
+    overdue = task.get("deadline_iso") and datetime.fromisoformat(task["deadline_iso"]) < datetime.now(timezone.utc)
     prefix = "🚨 OVERDUE" if overdue else "⏰ Still open"
 
     await context.bot.send_message(
@@ -169,10 +169,18 @@ async def nag_job(context: ContextTypes.DEFAULT_TYPE):
 
 
 # --------------------------------------------------------------- handlers --
+async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "I'm here. Just talk to me normally — no commands needed.\n\n"
+        "Example: \"I have a contract to send before 5pm\"\n"
+        "When it's done, just say so: \"finished the contract\""
+    )
+
+
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.effective_chat.id)
     user_text = update.message.text.strip()
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
 
     tasks = load_tasks()
     open_tasks = tasks.get(chat_id, {})
@@ -234,6 +242,7 @@ def main():
         raise SystemExit("Set NVIDIA_API_KEY env var first.")
 
     app = ApplicationBuilder().token(tg_token).build()
+    app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
     logger.info("Bot starting...")
