@@ -43,6 +43,7 @@ from datetime import datetime, timedelta, timezone
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
 from openai import OpenAI
+import dateparser
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -54,7 +55,7 @@ nim_client = OpenAI(
     base_url="https://integrate.api.nvidia.com/v1",
     api_key=os.environ.get("NVIDIA_API_KEY"),
 )
-NIM_MODEL = "meta/llama-3.3-70b-instruct"
+NIM_MODEL = "deepseek-ai/deepseek-v4-flash"
 
 PARSE_SYSTEM_PROMPT = """You are the intent parser for a task-reminder bot. \
 Given the user's message and their current open tasks, output ONLY a JSON object, \
@@ -116,6 +117,25 @@ def parse_message(user_text, open_tasks, now):
     except json.JSONDecodeError:
         logger.warning(f"Could not parse model output: {raw}")
         return {"intent": "unclear", "task_text": None, "deadline_iso": None, "matched_task_id": None}
+
+
+# ------------------------------------------------------------ local time --
+def extract_deadline_local(user_text, now):
+    """Try to compute an exact deadline in code rather than trusting the model
+    with time arithmetic. Handles things like '3 minutes from now', 'in 2 hours',
+    'tomorrow at 9am', '5pm' reliably. Returns ISO string or None if nothing found."""
+    result = dateparser.parse(
+        user_text,
+        settings={
+            "RELATIVE_BASE": now,
+            "PREFER_DATES_FROM": "future",
+            "TIMEZONE": "UTC",
+            "RETURN_AS_TIMEZONE_AWARE": True,
+        },
+    )
+    if result:
+        return result.isoformat()
+    return None
 
 
 # --------------------------------------------------------------- nag core --
@@ -191,17 +211,22 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if intent == "add":
         tasks.setdefault(chat_id, {})
         tid = next_task_id(tasks[chat_id])
+
+        # Prefer exact code-computed time over the model's math for reliability
+        local_deadline = extract_deadline_local(user_text, now)
+        final_deadline = local_deadline or parsed.get("deadline_iso")
+
         tasks[chat_id][tid] = {
             "text": parsed.get("task_text") or user_text,
-            "deadline_iso": parsed.get("deadline_iso"),
+            "deadline_iso": final_deadline,
             "created": now.isoformat(),
         }
         save_tasks(tasks)
 
-        deadline_msg = f" — due {parsed['deadline_iso']}" if parsed.get("deadline_iso") else ""
+        deadline_msg = f" — due {final_deadline}" if final_deadline else ""
         await update.message.reply_text(f"Got it: {tasks[chat_id][tid]['text']}{deadline_msg}. I will not let you forget.")
 
-        first_delay = next_interval_minutes(parsed.get("deadline_iso"))
+        first_delay = next_interval_minutes(final_deadline)
         await schedule_nag(context, chat_id, tid, first_delay)
 
     elif intent == "done":
